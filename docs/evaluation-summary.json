@@ -2,7 +2,7 @@
   "schemaVersion": "iris.evaluation-summary.v1",
   "date": "2026-10-03",
   "model": "gpt-6.1-sol",
-  "wasCommit": "5a7e10cc68c9a7247e10be80aa6aaedb621a9d08",
+  "wasCommit": "8c329b0cc58acf821e949f52746a36459ae43ca3",
   "scope": {
     "real": [
       "OpenAI Responses",
@@ -73,6 +73,52 @@
   "wasIntegration": {
     "allPassed": true,
     "modelCalls": 1,
+    "estimatedCostUsd": 0.00459,
+    "cases": [
+      {
+        "name": "syntax",
+        "passed": true,
+        "postHttpStatus": 202,
+        "repairStatus": "SUCCEEDED",
+        "resultStatus": "candidate_ready"
+      },
+      {
+        "name": "configuration",
+        "passed": true,
+        "postHttpStatus": 202,
+        "repairStatus": "SUCCEEDED",
+        "resultStatus": "configuration_required"
+      }
+    ],
+    "checks": {
+      "unauthorizedHttpStatus": 401,
+      "outsiderPostHttpStatus": 404,
+      "signedSourceUrlNotPersisted": true,
+      "outsiderGetHttpStatus": 404,
+      "outsiderArtifactHttpStatus": 404,
+      "tamperedArtifactHttpStatus": 502
+    }
+  },
+  "supersededSharedDatabaseAttempt": {
+    "reason": "Repair identifier collision in shared test database; repeated evaluation in isolated database",
+    "modelCalls": 1,
+    "estimatedCostUsd": 0.00465,
+    "successfulIntegrationEvidence": false
+  },
+  "totalObservedModelCalls": 6,
+  "totalEstimatedCostUsd": 0.026322,
+  "wasVerification": {
+    "testsPassed": 1178,
+    "migrationUpgradePassed": true,
+    "migrationSchemaCheckPassed": true,
+    "migrationDowngradePassed": true,
+    "migrationReupgradePassed": true
+  },
+  "credentialHandling": "Existing local OPENAI_API credential adapted to OPENAI_API_KEY; no credential values included",
+  "rawEvidence": "Private ignored artifacts directories; excluded from checked-in summary",
+  "previousWasIntegration": {
+    "allPassed": true,
+    "modelCalls": 1,
     "estimatedCostUsd": 0.00462,
     "cases": [
       {
@@ -111,21 +157,9 @@
       "tamperedArtifactHttpStatus": 502
     }
   },
-  "supersededSharedDatabaseAttempt": {
-    "reason": "Repair identifier collision in shared test database; repeated evaluation in isolated database",
-    "modelCalls": 1,
-    "estimatedCostUsd": 0.00465,
-    "successfulIntegrationEvidence": false
-  },
-  "totalObservedModelCalls": 5,
-  "totalEstimatedCostUsd": 0.021732,
-  "wasVerification": {
-    "testsPassed": 1005,
-    "migrationUpgradePassed": true,
-    "migrationSchemaCheckPassed": true,
-    "migrationDowngradePassed": true,
-    "migrationReupgradePassed": true
-  },
-  "credentialHandling": "Existing local OPENAI_API credential adapted to OPENAI_API_KEY; no credential values included",
-  "rawEvidence": "Private ignored artifacts directories; excluded from checked-in summary"
+  "wasMainBaseCommit": "460f4cbe550688dd0e0cccf997c6f45630bb01a2",
+  "pullRequests": {
+    "fixAgent": "https://github.com/2026-softbank-1/iris-code-fix-agent/pull/1",
+    "was": "https://github.com/2026-softbank-1/iris-was/pull/56"
+  }
 }

@@ -7,7 +7,8 @@ On 2026-10-03, actual `gpt-6.1-sol` Responses calls passed the standalone repair
 | Standalone syntax, inclusive interval behavior, unresolved symbol, configuration | 4/4 passed | 3 | 0.012462 |
 | WAS integration with isolated PostgreSQL: syntax and configuration | 2/2 passed | 1 | 0.004620 |
 | Earlier WAS attempt using a shared test database | Identifier collision; superseded by isolated run | 1 | 0.004650 |
-| Total observed calls | | 5 | 0.021732 |
+| Latest WAS main rebase: syntax and configuration | 2/2 passed | 1 | 0.004590 |
+| Total observed calls | | 6 | 0.026322 |
 
 Costs are estimates calculated from provider token usage and explicitly configured price rates, not invoice reconciliation. The standalone harness reserved at most $1 per attempt and $3 in aggregate. Each WAS evaluation allowed one attempt with a $1 cap. The shared-database attempt is included in the accounting; its failure was not treated as successful integration evidence.
 
@@ -19,7 +20,7 @@ The successful WAS run used the actual WAS main app, JWT Bearer authentication, 
 
 The WAS evaluation used main baseline `5a7e10cc68c9a7247e10be80aa6aaedb621a9d08` plus this PR’s uncommitted repair integration changes. User POST returned `202` with `RUNNING`; subsequent GET returned persisted `SUCCEEDED`. Cross-service input digests agreed, all three candidate artifacts matched their SHA-256 and byte length, and the failed deployment remained `FAILED`. Configuration bypass and cached replay produced no additional model call. Anonymous access returned `401`; another owner received `404` for submission, lookup, and artifact download. Deliberate corruption of an owned local artifact was rejected with `502` through the WAS endpoint.
 
-Separately, the WAS suite completed with **1,005 passing tests**. Migration upgrade, schema comparison/check, downgrade, and re-upgrade completed successfully. These checks are complementary to the model evaluation.
+After rebasing onto latest main `460f4cb`, the complete WAS suite passed **1,178 tests**, with Ruff/format and strict mypy. The latest paid evaluation passed on integration commit `8c329b0cc58acf821e949f52746a36459ae43ca3`; the original main-based run below remains historical evidence. Migration upgrade, schema comparison/check, downgrade, and re-upgrade completed successfully. These checks are complementary to the model evaluation.
 
 ## Limits
 
@@ -56,3 +57,5 @@ Private local evidence:
 
 - `artifacts/live-evaluation-20261003T032746Z/report.json`
 - `artifacts/was-evaluation-isolated-20261003T035451Z/report.json`
+
+Latest evidence: `artifacts/was-evaluation-latest-20261003T044738Z/report.json`. Companion PRs: [fix agent](https://github.com/2026-softbank-1/iris-code-fix-agent/pull/1), [WAS](https://github.com/2026-softbank-1/iris-was/pull/56).

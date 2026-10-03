@@ -48,3 +48,5 @@ docker run --rm -p 8000:8000 --env-file .env -v iris-fix-data:/data iris-code-fi
 ```
 
 The container runs as UID 10001 and persists state under `/data`; bind-mounted directories must be writable by that user. Keep the internal API behind your service network and provide the same authentication header for artifact downloads.
+
+WAS 연동 PR: [iris-was #56](https://github.com/2026-softbank-1/iris-was/pull/56). 실제 모델·WAS 검증 범위와 비용 기록: [live-evaluation.md](docs/live-evaluation.md).

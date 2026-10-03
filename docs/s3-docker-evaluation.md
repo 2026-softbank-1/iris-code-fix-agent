@@ -87,5 +87,19 @@ versioned bucket `iris-dev-code-fix-evaluation-187069338876-ap-northeast-2` unde
   remote source reread, and same-request replay passed for both cases.
 - Isolated repository checks: 104 passed, 1 skipped (the separately configured WAS
   database integration test). Ruff passed.
-- Cloud experiment results are recorded in `cloud-report.json` and the summary
-  below after the live deployment finishes.
+- Cloud: code service 15 failed deployment 26, corrected deployment 31 succeeded,
+  and REDEPLOY 33 succeeded. Docker service 16 failed deployment 27, corrected
+  deployment 30 succeeded, and REDEPLOY 34 succeeded. Both public URLs passed health
+  plus four arithmetic checks after REDEPLOY. Initial repaired deployments 29/28
+  also succeeded before adding explicit health metadata. Temporary 504 GET responses
+  were handled by read-only retries; mutations were not blindly retried.
+- All final cloud outcomes and explicit verification limits are in
+  [s3-docker-evaluation-summary.json](s3-docker-evaluation-summary.json). Full reports
+  and actual CodeBuild failure excerpts are in the private S3 bucket under
+  `evaluations/cb0b72f35a7e/reports/`. Original snapshots and cloud-configured source
+  archives are retained there alongside the sealed candidate artifacts.
+
+Public running fixtures:
+
+- [Code repair fixture](https://fix-e2e-cb0b72-code-15.likelion.uk/health)
+- [Docker repair fixture](https://fix-e2e-cb0b72-docker-16.likelion.uk/health)

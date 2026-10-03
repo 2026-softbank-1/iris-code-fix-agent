@@ -1,12 +1,13 @@
-"""Publish sealed candidates only on repair branches with draft pull requests."""
+"""Publish sealed candidates on hotfix branches and merge through GitHub PRs."""
 
 import base64
 import re
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from .canonical import sha256
 from .contracts import safe_path
 from .errors import RepairError
+from .github_auth import validate_repository
 from .paths import is_protected_path, validate_file_tree
 
 
@@ -14,12 +15,21 @@ class GitHubPublisher:
     def __init__(self, client):
         self.client = client
 
+    @staticmethod
+    def check_auth(response):
+        if response.status_code == 401:
+            raise RepairError("GITHUB_AUTH_FAILED", "GitHub authentication failed", 401)
+        if response.status_code == 403:
+            raise RepairError(
+                "GITHUB_PERMISSION_DENIED", "GitHub access denied or rate limited", 403
+            )
+
     async def api(self, method, repository, path, **kwargs):
-        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
-            raise RepairError("REPOSITORY_INVALID", "Invalid GitHub repository")
+        validate_repository(repository)
         response = await self.client.request(
-            method, f"/repos/{repository}/{path}", **kwargs
+            method, f"/repos/{repository}" + (f"/{path}" if path else ""), **kwargs
         )
+        self.check_auth(response)
         if response.is_error:
             raise RepairError("GITHUB_PUBLICATION_FAILED", "GitHub request failed", 502)
         return response.json()
@@ -56,6 +66,7 @@ class GitHubPublisher:
             response = await self.client.get(
                 f"/repos/{repository}/contents/{path}", params={"ref": base_sha}
             )
+            self.check_auth(response)
             if change["operation"] == "create":
                 if response.status_code != 404:
                     raise RepairError(
@@ -120,11 +131,15 @@ class GitHubPublisher:
         return created["sha"]
 
     async def publish(self, repository, branch, commit_sha):
-        if not re.fullmatch(r"iris/repair/[A-Za-z0-9][A-Za-z0-9_-]{0,127}", branch):
+        validate_repository(repository)
+        if not re.fullmatch(
+            r"(?:hotfix/iris|iris/repair)/[A-Za-z0-9][A-Za-z0-9_-]{0,127}", branch
+        ):
             raise RepairError("PATH_FORBIDDEN", "Publication requires a repair branch")
         response = await self.client.get(
             f"/repos/{repository}/git/ref/heads/{quote(branch, safe='')}"
         )
+        self.check_auth(response)
         if response.status_code == 200:
             if response.json().get("object", {}).get("sha") == commit_sha:
                 return
@@ -141,9 +156,13 @@ class GitHubPublisher:
             json={"ref": f"refs/heads/{branch}", "sha": commit_sha},
         )
 
-    async def open_pull_request(self, repository, branch, base_branch, title, body):
+    async def open_pull_request(
+        self, repository, branch, base_branch, title, body, *, draft=True
+    ):
         if (
-            not re.fullmatch(r"iris/repair/[A-Za-z0-9][A-Za-z0-9_-]{0,127}", branch)
+            not re.fullmatch(
+                r"(?:hotfix/iris|iris/repair)/[A-Za-z0-9][A-Za-z0-9_-]{0,127}", branch
+            )
             or branch == base_branch
         ):
             raise RepairError(
@@ -155,7 +174,7 @@ class GitHubPublisher:
             repository,
             "pulls",
             params={
-                "state": "open",
+                "state": "all",
                 "head": f"{owner}:{branch}",
                 "base": base_branch,
             },
@@ -165,6 +184,18 @@ class GitHubPublisher:
                 pull.get("head", {}).get("ref") == branch
                 and pull.get("base", {}).get("ref") == base_branch
             ):
+                if pull.get("state") == "closed" and not pull.get("merged_at"):
+                    raise RepairError(
+                        "PULL_REQUEST_CLOSED", "Repair pull request was closed", 409
+                    )
+                if bool(pull.get("draft", False)) != draft and not pull.get(
+                    "merged_at"
+                ):
+                    raise RepairError(
+                        "PULL_REQUEST_MODE_CHANGED",
+                        "Repair pull request mode changed",
+                        409,
+                    )
                 return pull["html_url"]
         pull = await self.api(
             "POST",
@@ -175,7 +206,74 @@ class GitHubPublisher:
                 "base": base_branch,
                 "title": title,
                 "body": body,
-                "draft": True,
+                "draft": draft,
             },
         )
         return pull["html_url"]
+
+    async def merge_pull_request(
+        self, repository, pull_url, branch, base_branch, commit_sha, base_sha
+    ):
+        """Reconcile merged PRs before checking base; pin the head in the merge API."""
+        validate_repository(repository)
+        parsed = urlsplit(pull_url)
+        match = re.fullmatch(
+            rf"/{re.escape(repository)}/pull/([1-9][0-9]*)", parsed.path
+        )
+        if parsed.scheme != "https" or parsed.netloc != "github.com" or not match:
+            raise RepairError("REPOSITORY_INVALID", "Invalid repair pull request URL")
+        if base_branch != "main" or not re.fullmatch(
+            r"(?:hotfix/iris|iris/repair)/[A-Za-z0-9][A-Za-z0-9_-]{0,127}", branch
+        ):
+            raise RepairError(
+                "PATH_FORBIDDEN", "Merge requires a hotfix branch into main"
+            )
+        number = match[1]
+        pull = await self.api("GET", repository, f"pulls/{number}")
+        if (
+            pull.get("head", {}).get("ref") != branch
+            or pull.get("head", {}).get("sha") != commit_sha
+            or pull.get("head", {}).get("repo", {}).get("full_name", "").lower()
+            != repository.lower()
+            or pull.get("base", {}).get("ref") != base_branch
+            or pull.get("base", {}).get("repo", {}).get("full_name", "").lower()
+            != repository.lower()
+        ):
+            raise RepairError("SOURCE_HEAD_CHANGED", "Repair pull request changed", 409)
+        if pull.get("merged"):
+            if not pull.get("merge_commit_sha"):
+                raise RepairError(
+                    "GITHUB_PUBLICATION_FAILED", "Merge SHA unavailable", 502
+                )
+            return pull["merge_commit_sha"]
+        if pull.get("state") != "open":
+            raise RepairError(
+                "PULL_REQUEST_CLOSED", "Repair pull request was closed", 409
+            )
+        if pull.get("draft"):
+            raise RepairError("MERGE_BLOCKED", "Repair pull request is a draft", 409)
+        if await self.head(repository, base_branch) != base_sha:
+            raise RepairError(
+                "SOURCE_HEAD_CHANGED", "Main branch changed before merge", 409
+            )
+        response = await self.client.put(
+            f"/repos/{repository}/pulls/{number}/merge",
+            json={"sha": commit_sha, "merge_method": "merge"},
+        )
+        if response.status_code == 409:
+            raise RepairError(
+                "SOURCE_HEAD_CHANGED", "Repair head changed before merge", 409
+            )
+        if response.status_code in {405, 422}:
+            raise RepairError(
+                "MERGE_BLOCKED",
+                "GitHub checks, protection or conflicts block merge",
+                409,
+            )
+        self.check_auth(response)
+        if response.is_error:
+            raise RepairError("GITHUB_PUBLICATION_FAILED", "GitHub merge failed", 502)
+        result = response.json()
+        if not result.get("merged") or not result.get("sha"):
+            raise RepairError("MERGE_BLOCKED", "GitHub did not merge the repair", 409)
+        return result["sha"]

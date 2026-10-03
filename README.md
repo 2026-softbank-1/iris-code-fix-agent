@@ -1,6 +1,6 @@
 # IRIS Code Fix Agent
 
-Python 3.11 service that turns a frozen source snapshot and an original `diagnosis-result.v3` into a bounded repair candidate. The default model is `gpt-6.1-sol` with medium reasoning. The candidate API never executes downloaded source or pushes Git branches. A separate preauthorized coordinator can store candidates in S3, publish a repair branch and open a draft PR; see [repair coordination](docs/auto-repair.md).
+Python 3.11 service that turns a frozen source snapshot and an original `diagnosis-result.v3` into a bounded repair candidate. The default model is `gpt-6.1-sol` with medium reasoning. The candidate API never executes downloaded source or pushes Git branches. A separate preauthorized coordinator can store candidates in S3, publish a hotfix branch, open a PR and merge into main; see [repair coordination](docs/auto-repair.md).
 
 The implemented MVP generates candidates synchronously, persists request outcomes, and serves sealed artifacts through authenticated endpoints. `candidate_ready` means a proposed change exists. Verification is `not_run`, owned by WAS; it does not indicate a successful build or deployment. The coordinator stops at `PR_OPENED` for review, preserving the service branch. Candidate validation, PR merge and deployment remain separate steps.
 

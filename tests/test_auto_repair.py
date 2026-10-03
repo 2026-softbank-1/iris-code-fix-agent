@@ -33,6 +33,8 @@ class FakePublisher:
         self.branches = {}
         self.pulls = []
         self.fail_pr_response = False
+        self.fail_merge_response = False
+        self.merges = []
 
     async def head(self, *_):
         return self.sha
@@ -43,13 +45,15 @@ class FakePublisher:
         return chr(ord("b") + len(self.prepares) - 1) * 40
 
     async def publish(self, repository, branch, commit):
-        assert branch.startswith("iris/repair/")
+        assert branch.startswith("hotfix/iris/")
         if branch not in self.branches:
             self.pushes.append(commit)
             self.branches[branch] = commit
         assert self.branches[branch] == commit
 
-    async def open_pull_request(self, repository, branch, base_branch, title, body):
+    async def open_pull_request(
+        self, repository, branch, base_branch, title, body, *, draft=True
+    ):
         assert base_branch == "main" and branch in self.branches
         if not self.pulls:
             self.pulls.append((branch, base_branch))
@@ -58,15 +62,32 @@ class FakePublisher:
                 raise RepairError("GITHUB_PUBLICATION_FAILED", "Lost PR response")
         return "https://github.com/owner/repo/pull/1"
 
+    async def merge_pull_request(
+        self, repository, url, branch, base_branch, commit, base
+    ):
+        assert base_branch == "main" and self.branches[branch] == commit
+        if not self.merges:
+            assert self.sha == base
+            self.merges.append(commit)
+            self.sha = "c" * 40
+            if self.fail_merge_response:
+                self.fail_merge_response = False
+                raise httpx.ReadTimeout("Lost merge response")
+        return self.sha
 
+
+@pytest.mark.parametrize(
+    "draft_pr,resume_merge", [(True, False), (False, False), (False, True)]
+)
 @pytest.mark.parametrize("auto_deploy", [True, False])
 @pytest.mark.parametrize("resume_storage", [True, False])
 @pytest.mark.parametrize("resume_pr", [True, False])
-async def test_candidate_repair_branch_draft_pr_without_redeployment(
-    tmp_path, auto_deploy, resume_storage, resume_pr
+async def test_hotfix_pr_merge_and_resume_without_redeployment(
+    tmp_path, auto_deploy, resume_storage, resume_pr, draft_pr, resume_merge
 ):
     publisher = FakePublisher()
     publisher.fail_pr_response = resume_pr
+    publisher.fail_merge_response = resume_merge
     storage_client = Mock()
     storage_client.put_object.return_value = {"VersionId": "v1"}
     content = b"value = 0\n"
@@ -196,33 +217,56 @@ async def test_candidate_repair_branch_draft_pr_without_redeployment(
             storage_client.put_object.side_effect = ClientError(
                 {"Error": {"Code": "ServiceUnavailable"}}, "PutObject"
             )
-            interrupted = await worker.run("recursive", 1, 1, allowed_paths=["app.py"])
+            interrupted = await worker.run(
+                "recursive", 1, 1, allowed_paths=["app.py"], draft_pr=draft_pr
+            )
             assert interrupted["status"] == "PAUSED_ERROR"
             assert len(generation_calls) == 1 and not publisher.pushes
             storage_client.put_object.side_effect = None
             storage_client.reset_mock()
-        result = await worker.run("recursive", 1, 1, allowed_paths=["app.py"])
+        result = await worker.run(
+            "recursive", 1, 1, allowed_paths=["app.py"], draft_pr=draft_pr
+        )
         if resume_pr:
             assert result["status"] == "PAUSED_ERROR"
             assert result["attempts"][0]["stage"] == "OPENING_PR"
-            result = await worker.run("recursive", 1, 1, allowed_paths=["app.py"])
-        assert result["status"] == "PR_OPENED"
+            result = await worker.run(
+                "recursive", 1, 1, allowed_paths=["app.py"], draft_pr=draft_pr
+            )
+        if resume_merge:
+            assert result["status"] == "PAUSED_ERROR"
+            assert result["attempts"][0]["stage"] == "MERGING"
+            result = await worker.run(
+                "recursive", 1, 1, allowed_paths=["app.py"], draft_pr=draft_pr
+            )
+        assert result["status"] == ("PR_OPENED" if draft_pr else "MERGED")
         assert result["pullRequestUrl"] == "https://github.com/owner/repo/pull/1"
         # The fixture WAS context carries no frozen hashes, so the journal says so.
         assert result["attempts"][0]["sourcePinned"] is False
         assert len(publisher.pushes) == len(generation_calls) == 1
-        assert publisher.sha == "a" * 40
-        assert publisher.branches == {"iris/repair/recursive-a1": "b" * 40}
-        assert publisher.pulls == [("iris/repair/recursive-a1", "main")]
+        assert publisher.sha == ("a" if draft_pr else "c") * 40
+        assert len(publisher.merges) == (0 if draft_pr else 1)
+        if not draft_pr:
+            assert result["mergeCommitSha"] == "c" * 40
+        assert publisher.branches == {"hotfix/iris/recursive-a1": "b" * 40}
+        assert publisher.pulls == [("hotfix/iris/recursive-a1", "main")]
         assert manual_calls == []
         assert storage_client.put_object.call_count == 4
         stored = storage_client.put_object.call_args_list[-1].kwargs
         with tarfile.open(fileobj=io.BytesIO(stored["Body"])) as tar:
             assert tar.extractfile("app.py").read() == b"value = 1\n"
         assert "downloadUrl" not in (tmp_path / "recursive.json").read_text()
-        assert await worker.run("recursive", 1, 1, allowed_paths=["app.py"]) == result
+        assert (
+            await worker.run(
+                "recursive", 1, 1, allowed_paths=["app.py"], draft_pr=draft_pr
+            )
+            == result
+        )
         assert len(publisher.pushes) == len(publisher.pulls) == 1
-        assert await worker.watch_once(1, allowed_paths=["app.py"]) is None
+        assert (
+            await worker.watch_once(1, allowed_paths=["app.py"], draft_pr=draft_pr)
+            is None
+        )
         assert len(generation_calls) == 1
 
 
@@ -252,3 +296,59 @@ def test_classic_github_token_is_flagged(capsys):
     assert "fine-grained" in capsys.readouterr().err
     assert not warn_if_broad_github_token("github_pat_" + "a" * 40)
     assert capsys.readouterr().err == ""
+
+
+async def test_legacy_journal_cannot_gain_automatic_merge_on_resume(tmp_path):
+    state = {
+        "runId": "old-run",
+        "status": "PR_OPENED",
+        "attempts": [],
+        "deploymentId": 1,
+        "deadline": 0,
+        "settings": {
+            "serviceId": 1,
+            "initialDeploymentId": 1,
+            "maxAttempts": 1,
+            "maxCostUsd": 1,
+            "allowedPaths": ["app.py"],
+            "timeoutSeconds": 1800,
+        },
+    }
+    (tmp_path / "old-run.json").write_bytes(canonical_json(state))
+    worker = AutoRepair(None, None, None, None, None, tmp_path, allowed_source_hosts=())
+    with pytest.raises(RepairError) as error:
+        await worker.run("old-run", 1, 1, allowed_paths=["app.py"])
+    assert error.value.code == "IDEMPOTENCY_CONFLICT"
+    result = await worker.run("old-run", 1, 1, allowed_paths=["app.py"], draft_pr=True)
+    assert result["status"] == "PR_OPENED"
+    assert result["settings"]["draftPr"] is True
+
+
+async def test_automatic_merge_requires_service_main_before_generation(tmp_path):
+    def handler(request):
+        if request.url.path.endswith("/diagnose"):
+            return httpx.Response(202, json={"id": 1})
+        if request.url.path.endswith("/diagnosis"):
+            return httpx.Response(200, json={"id": 1, "status": "SUCCEEDED"})
+        assert request.url.path.endswith("/repair-context")
+        return httpx.Response(
+            200, json={"repositoryUrl": "https://github.com/o/r", "branch": "develop"}
+        )
+
+    async with httpx.AsyncClient(
+        base_url="https://was.test", transport=httpx.MockTransport(handler)
+    ) as was:
+        worker = AutoRepair(
+            was,
+            None,
+            None,
+            None,
+            None,
+            tmp_path,
+            allowed_source_hosts=(),
+            poll_seconds=0,
+        )
+        result = await worker.run("wrong-branch", 1, 1)
+        assert result["status"] == "STOPPED"
+        assert result["reason"] == "TARGET_BRANCH_INVALID"
+        assert "candidate" not in result["attempts"][0]

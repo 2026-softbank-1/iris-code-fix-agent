@@ -1,4 +1,4 @@
-"""Durable repair candidate -> private S3 -> repair branch -> draft review PR."""
+"""Durable repair candidate -> private S3 -> hotfix branch -> PR -> main merge."""
 
 import argparse
 import asyncio
@@ -20,6 +20,7 @@ from .canonical import canonical_json, sha256
 from .configuration import load_environment
 from .contracts import SourceSpec
 from .errors import RepairError
+from .github_auth import GITHUB_HEADERS, GitHubAuth, WasGitHubAuth
 from .publication import GitHubPublisher
 from .source import (
     SourceFile,
@@ -102,6 +103,7 @@ class AutoRepair:
         timeout_seconds=1800,
         max_cost_usd=1,
         allowed_paths=None,
+        draft_pr=False,
     ):
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,80}", run_id):
             raise ValueError("Invalid run ID")
@@ -119,6 +121,7 @@ class AutoRepair:
             "maxCostUsd": max_cost_usd,
             "allowedPaths": allowed_paths or ["**"],
             "timeoutSeconds": timeout_seconds,
+            "draftPr": draft_pr,
         }
         with ResultStore(self.state_dir / "locks").lock(run_id):
             state = (
@@ -133,11 +136,13 @@ class AutoRepair:
                     "deploymentId": deployment_id,
                 }
             )
+            # Old journals predate automatic merging; never upgrade their authorization.
+            state["settings"].setdefault("draftPr", True)
             if state["settings"] != settings:
                 raise RepairError(
                     "IDEMPOTENCY_CONFLICT", "Automatic repair run settings changed", 409
                 )
-            if state["status"] in {"PR_OPENED", "STOPPED"}:
+            if state["status"] in {"PR_OPENED", "MERGED", "STOPPED"}:
                 return state
             state["status"] = "RUNNING"
             state.pop("reason", None)
@@ -158,6 +163,9 @@ class AutoRepair:
                 # External outages can resume the same persisted attempt, never a new model call.
                 terminal = exc.code in {
                     "SOURCE_HEAD_CHANGED",
+                    "TARGET_BRANCH_INVALID",
+                    "PULL_REQUEST_CLOSED",
+                    "PULL_REQUEST_MODE_CHANGED",
                     "PREIMAGE_MISMATCH",
                     "NO_CODE_PLAN",
                     "ARTIFACT_INTEGRITY_ERROR",
@@ -176,7 +184,7 @@ class AutoRepair:
                 return state
 
     async def watch_once(self, service_id, **limits):
-        """Resume pending publication; skip incidents that already have a draft PR."""
+        """Resume pending publication/merge; skip incidents already handled."""
         records = [
             json.loads(path.read_text()) for path in self.state_dir.glob("*.json")
         ]
@@ -282,6 +290,12 @@ class AutoRepair:
                     raise RepairError(
                         "REPOSITORY_INVALID", "Only GitHub repositories are supported"
                     )
+                if not state["settings"]["draftPr"] and context["branch"] != "main":
+                    raise RepairError(
+                        "TARGET_BRANCH_INVALID",
+                        "Automatic hotfix merge requires main",
+                        409,
+                    )
                 identity = {
                     "repository": repository,
                     "branch": context["branch"],
@@ -303,7 +317,9 @@ class AutoRepair:
                     )
                 # Prefer hashes frozen by WAS. Without them the archive can only vouch for
                 # itself, so the attempt records that the source was not pinned.
-                pinned = bool(source.get("archiveSha256") and source.get("manifestSha256"))
+                pinned = bool(
+                    source.get("archiveSha256") and source.get("manifestSha256")
+                )
                 spec = SourceSpec(
                     repositoryId=repository,
                     baseCommitSha=source["commitSha"],
@@ -453,7 +469,9 @@ class AutoRepair:
                 )
                 attempt["stage"] = "PUSHING"
                 self.save(state)
-            repair_branch = f"iris/repair/{attempt['requestId']}"
+            repair_branch = attempt.get(
+                "repairBranch", f"hotfix/iris/{attempt['requestId']}"
+            )
             if attempt["stage"] == "PUSHING":
                 await self.github.publish(
                     target["repository"], repair_branch, attempt["commitSha"]
@@ -468,11 +486,28 @@ class AutoRepair:
                     f"fix: IRIS repair candidate {attempt['requestId']}",
                     "Code repair candidate generated from the original failed deployment "
                     f"{attempt['deploymentId']} and pinned source {attempt['baseSha']}.\n\n"
-                    "Validation: not run. Review and independently validate before merging. "
-                    "The service branch and deployment have not been changed.",
+                    "Validation: not run by this coordinator. GitHub required checks and "
+                    "branch protection apply to merging this hotfix into main.",
+                    draft=state["settings"]["draftPr"],
                 )
-            attempt["stage"] = "PR_OPENED"
-            state.update(status="PR_OPENED", pullRequestUrl=attempt["pullRequestUrl"])
+            state["pullRequestUrl"] = attempt["pullRequestUrl"]
+            if state["settings"]["draftPr"]:
+                attempt["stage"] = "PR_OPENED"
+                state["status"] = "PR_OPENED"
+                self.save(state)
+                return state
+            attempt["stage"] = "MERGING"
+            self.save(state)
+            attempt["mergeCommitSha"] = await self.github.merge_pull_request(
+                target["repository"],
+                attempt["pullRequestUrl"],
+                repair_branch,
+                target["branch"],
+                attempt["commitSha"],
+                attempt["baseSha"],
+            )
+            attempt["stage"] = "DONE"
+            state.update(status="MERGED", mergeCommitSha=attempt["mergeCommitSha"])
             self.save(state)
             return state
         state.update(status="STOPPED", reason="ATTEMPT_LIMIT")
@@ -495,7 +530,6 @@ def warn_if_broad_github_token(token: str) -> bool:
 
 def main():
     load_environment()
-    warn_if_broad_github_token(os.environ.get("GITHUB_TOKEN", ""))
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-id")
     parser.add_argument("--service-id", type=int, required=True)
@@ -503,7 +537,10 @@ def main():
     parser.add_argument(
         "--watch",
         action="store_true",
-        help="Open draft repair PRs for new failed deployments of this service",
+        help="Create hotfix PRs and merge into main for new failed deployments",
+    )
+    parser.add_argument(
+        "--draft-pr", action="store_true", help="Stop at a draft PR for manual review"
     )
     parser.add_argument("--allowed-path", action="append", required=True)
     parser.add_argument("--max-attempts", type=int, default=1)
@@ -517,6 +554,10 @@ def main():
         import boto3
         from botocore.config import Config
 
+        mode = os.environ.get("GITHUB_AUTH_MODE", "was").strip() or "was"
+        auth = None if mode == "was" else GitHubAuth.from_environment()
+        if auth is not None and auth.mode == "token":
+            warn_if_broad_github_token(auth.token)
         storage = S3Artifacts(
             boto3.client(
                 "s3",
@@ -537,14 +578,14 @@ def main():
             ) as fix,
             httpx.AsyncClient(
                 base_url="https://api.github.com",
-                headers={
-                    "Authorization": "Bearer " + os.environ["GITHUB_TOKEN"],
-                    "Accept": "application/vnd.github+json",
-                },
+                auth=auth,
+                headers=GITHUB_HEADERS,
                 timeout=30,
             ) as github,
             httpx.AsyncClient(follow_redirects=False, timeout=30) as source,
         ):
+            if auth is None:
+                github.auth = WasGitHubAuth(was, args.service_id)
             worker = AutoRepair(
                 was,
                 fix,
@@ -561,6 +602,7 @@ def main():
                 "timeout_seconds": args.timeout_seconds,
                 "max_cost_usd": args.max_cost_usd,
                 "allowed_paths": args.allowed_path,
+                "draft_pr": args.draft_pr,
             }
             while True:
                 result = (
@@ -579,12 +621,14 @@ def main():
                                 "reason": result.get("reason"),
                                 "deploymentId": result["deploymentId"],
                                 "attempts": len(result["attempts"]),
+                                "pullRequestUrl": result.get("pullRequestUrl"),
+                                "mergeCommitSha": result.get("mergeCommitSha"),
                             }
                         ),
                         flush=True,
                     )
                 if not args.watch:
-                    return result["status"] == "PR_OPENED"
+                    return result["status"] in {"PR_OPENED", "MERGED"}
                 await asyncio.sleep(worker.poll_seconds)
 
     raise SystemExit(0 if asyncio.run(execute()) else 1)

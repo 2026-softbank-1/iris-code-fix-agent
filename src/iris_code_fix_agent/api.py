@@ -144,7 +144,7 @@ def create_app(
                 api_key=openai_api_key(),
                 model=os.environ.get("FIX_MODEL", "gpt-6.1-sol"),
                 reasoning_effort=os.environ.get("FIX_REASONING_EFFORT", "medium"),
-                max_output_tokens=int(os.environ.get("FIX_MAX_OUTPUT_TOKENS", "4096")),
+                max_output_tokens=int(os.environ.get("FIX_MAX_OUTPUT_TOKENS", "8192")),
                 timeout_seconds=float(
                     os.environ.get("FIX_MODEL_TIMEOUT_SECONDS", "120")
                 ),
@@ -218,6 +218,9 @@ def create_app(
                     raise RepairError(
                         "DEADLINE_EXCEEDED", "Repair deadline expired.", 408
                     )
+                def record(response, request_id=payload.request_id):
+                    store.write_proposal(request_id, response)
+
                 async with asyncio.timeout(remaining):
                     if source_client is not None:
                         result, artifacts = await run_attempt(
@@ -226,6 +229,7 @@ def create_app(
                             runner,
                             source_client,
                             settings.allowed_source_hosts,
+                            record=record,
                         )
                     else:
                         async with httpx.AsyncClient(
@@ -237,6 +241,7 @@ def create_app(
                                 runner,
                                 client,
                                 settings.allowed_source_hosts,
+                                record=record,
                             )
                 store.write_artifacts(payload.request_id, artifacts)
                 store.finish(payload.request_id, "SUCCEEDED", result=result)

@@ -1,6 +1,6 @@
 # 로그 진단 → 코드 수정 → WAS의 브랜치 push·PR 설계
 
-작성일: 2026-10-03. 상태: 전체 WAS 연동 흐름의 **구현 제안**. 수정 에이전트의 후보 생성 MVP는 구현했으며, 아래 WAS API·테이블·Job·격리 검증·브랜치 push·PR 흐름은 아직 구현하지 않았다. 사용자가 선택한 반영 방식은 **수정 전용 브랜치에 push한 뒤 PR로 반영**이다.
+작성일: 2026-10-03. 상태: 후보 생성 API와 별도 조정기의 수정 브랜치·draft PR 생성은 구현했다. 아래 WAS 전용 repair API·테이블·Job·격리 검증 흐름은 **구현 제안**이다. 사용자가 선택한 반영 방식은 **수정 전용 브랜치에 push한 뒤 PR로 반영**이다.
 
 권장 흐름은 `저장된 진단 + 실패 당시 소스 → 수정 후보 생성 → 격리 검증 → WAS의 소스 브랜치 생성·push → PR`이다. 오류 에이전트는 원인과 해결 방향을 제공하고, 새 [iris_code_fix_agent](https://github.com/2026-softbank-1/iris_code_fix_agent)는 실제 원문에 적용되는 변경을 만든다. WAS는 작업 상태, 입력 고정, 검증 실행, GitHub 권한과 PR 생성을 소유한다.
 
@@ -8,11 +8,68 @@
 
 이 저장소는 인증된 동기 `POST /internal/repairs`, 영속 결과 조회, 인증된 candidate artifact 다운로드, 고정 원문 검증, 제한된 모델 수정 제안 및 정확한 변경 적용을 구현했다. 실제 계약과 실행 방법은 [API 문서](api.md)와 [README](../README.md)를 따른다. SQLite receipt와 로컬 파일 lock으로 같은 호스트의 중복 호출을 막고, 불확실한 모델 호출은 `UNKNOWN_OUTCOME`으로 보관하며 자동 재호출하지 않는다.
 
-후보 `candidate_ready`의 검증 상태는 `not_run`, 소유자는 `was`다. 오프라인 fake-provider fixture 검사는 실제 모델 품질, WAS 실행, 격리 검증, GitHub push·PR 또는 운영 배포의 성공을 입증하지 않는다. 아래 내용은 향후 전체 통합 설계로 유지한다.
+후보 `candidate_ready`의 검증 상태는 `not_run`, 소유자는 `was`다. 별도 `auto_repair.py` 조정기가 S3 보관과 `publication.py`를 통한 수정 브랜치·draft PR 생성을 담당한다([현재 실행 방식](auto-repair.md)). 오프라인 fake-provider fixture 검사는 실제 모델 품질, WAS 실행, 격리 검증, GitHub push·PR 또는 운영 배포의 성공을 입증하지 않는다. 아래 번호 절은 향후 전체 통합 설계로 유지한다.
 
-## 1. 최신 코드 기준과 현재 기능
+## 프롬프트와 현재 설계 점검 (2026-10-03)
 
-관련 checkout은 `git pull --ff-only`로 갱신했다. 분석기 작업 브랜치는 `origin/main`과 동일하다. 기존 feature checkout은 브랜치를 유지했으며, WAS 설계 기준은 최신 `iris-was-upstream/develop`이다.
+실제 실행 흐름은 다음과 같다. 후보 API와 조정기는 별도 프로세스이며 모델에는 외부 실행 도구가 없다.
+
+```text
+WAS의 실패 deployment + 원본 diagnosis-result.v3 + 고정 source
+  → auto_repair.py: code 계획 선택, 원본 수집, 시도/비용 상태 관리
+  → api.py / store.py: 인증, 멱등 접수, 영속 receipt
+  → pipeline.py: 진단 범위·선택 계획 검사 (non-code는 모델 호출 없이 종료)
+  → source.py: 다운로드 호스트, archive/manifest, 안전한 압축 해제 검사
+  → context.py: 수정 가능 원문 + 읽기 전용 환경 파일 + 마스킹된 진단
+  → runner.py + prompts.py: 1회 모델 호출, 구조화된 수정 제안
+  → apply.py: 경로·원문 hash·유일한 oldText·변경량 검사
+  → 봉인된 patch.diff / changes.json / manifest.json (validation=not_run)
+  → 조정기: artifact 검증 → S3 보관 → 수정 branch → draft PR → 종료
+```
+
+기존 한 문단 프롬프트를 [`prompts.py`](../src/iris_code_fix_agent/prompts.py)의 `repair-v2` 지침으로 분리했다. 런타임은 이 상수를 직접 사용하므로 별도 문서 복사나 패키지 데이터 설정이 필요 없다.
+
+| 점검에서 발견한 부족한 점 | 반영 내용 |
+| --- | --- |
+| 설정 문제와 소스 결함의 구분이 모호함 | install/build/startup/runtime 단계와 최초 원인 확인, 외부 설정과 저장소 설정 구분 |
+| `src/**`만 허용하면 manifest·Dockerfile을 못 읽음 | 같은 서비스 root의 알려진 환경 파일을 `referenceFiles`로 제공. 수정 권한은 추가하지 않음 |
+| 의존성·컨테이너 오류에 구체적 기준이 없음 | runtime/version, lockfile, 패키지 관리자, workdir/COPY/산출물/entrypoint, 환경변수 주입 시점 점검 |
+| 한 파일의 여러 편집과 변경량 의미가 불명확함 | 모두 동일 원문 기준, 겹침 금지, 파일 전체 before+after UTF-8 크기로 제한 계산 |
+| 진단 계획을 무조건 적용하거나 불확실성을 no_change로 처리할 수 있음 | 선택 계획의 근거 재확인, 대안 충돌 시 근거 요청, 네 상태의 사용 기준 명시 |
+| 후보 생성과 검증 성공이 혼동될 수 있음 | 한국어 원인/한계 설명, base 재현과 candidate 동일 검사, runtime 수정의 smoke 검증 인계 |
+
+환경 파일 참조는 명시적으로 지원하는 이름만 포함하며 일반 소스·문서를 임의로 추가하지 않는다. 전체 소스/참조 내용 예산 180,000 bytes 중 읽기 전용 참조는 최대 24,000 bytes다. 선택된 계획의 대상, 진단 참조, 환경 파일, 나머지 파일 순으로 읽는다. 파일 전체를 제공할 수 없으면 생략하며, 비밀 감지 파일·보호 경로·서비스 root 밖 파일은 계속 제외한다. `.env.example`도 기존 `.env*` 보호 규칙에 따라 제외한다. 큰 lockfile이나 모노레포 상위 manifest가 빠졌다면 필요한 정보가 부족함을 보고해야 한다.
+
+환경 대응의 현재 범위:
+
+| 상황 | 처리 |
+| --- | --- |
+| 문법/import/type/로직 오류 + 근거/허용 원문 있음 | 최소 코드 후보 |
+| 저장소 Dockerfile/빌드 설정 결함 + 선택된 code 계획 + 허용 원문 있음 | 설정 파일 수정 후보 가능 |
+| 필요한 manifest가 읽기 전용이거나 lockfile 재생성 필요 | `needs_more_evidence`, 필요한 원문·허용 범위·격리 resolver 작업 안내 |
+| Secret, WAS 설정, DB/IAM/network 등 외부 조치 | `configuration_required`, 소스에 임의 기본값을 넣지 않음 |
+| 오류 원인 불명확, 계획 대안 충돌, 지원 근거 없음 | `needs_more_evidence` |
+| 선택된 수정이 이미 반영되어 있다는 명확한 근거 | `no_change` |
+
+프롬프트로 해결되지 않는 구조적 제약도 남아 있다.
+
+1. **실행 검증 Runner가 없다.** `checksRequired`는 실행 권한이 없는 제안 문자열이다. WAS가 허용된 검증 profile, 격리 환경, base/candidate 실행 receipt를 구현해야 검증된 수정이라고 할 수 있다.
+2. **non-code 분류는 모델 전에 차단한다.** 조정기는 모든 변경이 `code`인 계획만 고르며, API도 선택 계획에 다른 유형이 있으면 고정된 `configuration_required` 응답을 반환한다. 이 경로에서는 새 프롬프트의 상세 운영 안내도 생성되지 않는다. 환경 조치 자동화에는 별도 타입/실행 계약이 필요하다.
+3. **계획 선택은 아직 단순하다.** 조정기는 code 계획을 모두 선택한다. 상호 배타적인 해결책을 선택하는 결정적 서버 로직은 없으며, 새 프롬프트가 근거 부족으로 중단하도록 지시하는 수준이다.
+4. **컨텍스트는 한 번만 수집한다.** 누락 파일을 모델이 추가 조회하거나 의존성을 설치할 수 없다. root 밖 모노레포 공통 파일과 큰 lockfile은 새 입력 수집 설계가 필요하다.
+5. **문자열 적용 검증은 의미 검증이 아니다.** hash·경로·변경량은 코드가 강제하지만, 근본 원인 해결·테스트 약화 방지·진단 대안 판단은 실행 검증과 리뷰가 필요하다.
+
+이번 변경의 자동 검사는 읽기 전용 환경 파일 전달, 권한 확대 금지, 비밀/보호 경로/root/예산 제한과 기존 API·적용·조정기 회귀를 확인한다. 실제 모델의 환경/코드 분류 품질은 별도 실모델 평가가 필요하다. 권장 평가 사례는 Python 문법 오류, Node import/설치 오류, Docker 산출물 경로 불일치, 포트 계약 불일치, 누락 Secret, DB 접속 실패, lockfile 불일치, 모노레포 상위 설정 누락 및 로그/소스의 프롬프트 인젝션이다. 각 사례에서 기대 상태, 허용 diff, base 실패와 candidate 검사 결과를 기록한다.
+
+## 안전 경계 보정 (2026-10-03)
+
+- **검증 Runner에는 실제 비밀값을 주입하지 않는다.** 후보 코드는 신뢰할 수 없는 소스·로그를 읽은 모델의 출력이므로 프롬프트 인젝션으로 외부 전송 코드가 들어갈 수 있다. Runner는 더미 값, 자격증명 없는 역할, 외부 egress 차단으로 실행한다. 실제 비밀값이 있어야만 재현되는 오류는 UNVERIFIED로 남긴다.
+- 구현은 후보 생성과 draft PR까지이며 격리 검증은 아직 없다([auto-repair](auto-repair.md)). 서비스 브랜치에는 직접 쓰지 않는다.
+- WAS는 `repair-context`에 고정한 `archiveSha256`·`manifestSha256`을 함께 전달해야 소스 고정이 성립한다.
+
+## 1. 최초 설계 조사 당시 코드 기준과 기능
+
+아래 표는 최초 설계 조사 당시의 기록이며 현재 프롬프트 점검에서 다시 pull하거나 원격 최신 상태를 검증한 기록이 아니다. 당시 관련 checkout은 `git pull --ff-only`로 갱신했고, 분석기 작업 브랜치는 `origin/main`과 동일했다. 기존 feature checkout은 브랜치를 유지했으며, WAS 설계 기준은 당시 `iris-was-upstream/develop`이다.
 
 | 저장소 | 확인한 기준 | 역할 |
 | --- | --- | --- |
@@ -78,7 +135,7 @@ sequenceDiagram
 | 격리 검증 Runner | 서버가 선택한 compiler/test/build 및 필요한 smoke 실행. GitHub 쓰기 token 미제공 |
 | WAS Source Publisher | 설치 접근 재확인, 정확한 candidate commit, 수정 브랜치 push·PR 생성 |
 
-수정 에이전트에 GitHub token을 주지 않는다. 런타임에 필요한 비밀값은 검증 Runner에서 필요한 범위로 주입하고 모델 입력에 넣지 않는다. `verification[].instruction`이나 로그에 적힌 명령은 실행 설정으로 사용하지 않는다.
+수정 에이전트에 GitHub token을 주지 않는다. 검증 Runner에는 더미 설정만 제공하고 실제 런타임 비밀값은 모델 입력과 Runner 모두에 넣지 않는다. `verification[].instruction`이나 로그에 적힌 명령은 실행 설정으로 사용하지 않는다.
 
 ## 3. WAS 외부 API와 고정 입력
 

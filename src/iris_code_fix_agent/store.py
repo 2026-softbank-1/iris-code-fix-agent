@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .canonical import sha256
+from .canonical import canonical_json, sha256
 from .errors import RepairError
 
 
@@ -140,6 +140,24 @@ class ResultStore:
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
+
+    def write_proposal(self, request_id: str, response) -> None:
+        """Persist the raw model proposal before it is applied; never served over the API."""
+        self.write_artifacts(
+            request_id,
+            {
+                "proposal.json": canonical_json(
+                    {
+                        "proposal": response.proposal.model_dump(
+                            mode="json", by_alias=True
+                        ),
+                        "usage": response.usage,
+                        "model": response.model,
+                        "providerRequestId": response.provider_request_id,
+                    }
+                )
+            },
+        )
 
     def artifact(self, request_id: str, name: str) -> Path:
         if name not in {"patch.diff", "changes.json", "manifest.json"}:

@@ -1,6 +1,6 @@
 # Implemented internal repair API
 
-This document describes the candidate-generation MVP. [code-repair-design.md](code-repair-design.md) describes proposed WAS integration and broader verification/publishing behavior; those features are not implemented here.
+This document describes the candidate-generation MVP. [code-repair-design.md](code-repair-design.md) distinguishes the current implementation from proposed WAS repair jobs and isolated verification. A separate [coordinator](auto-repair.md) implements repair-branch and draft-PR publication.
 
 All repair endpoints require `X-API-Key`, compared against the configured `API_KEY` secret. Run behind an internal TLS/network boundary. Request contracts reject unexpected fields. `GET /healthz` is an unauthenticated readiness endpoint. Validation errors include field locations and error types without echoing rejected input or signed URLs.
 
@@ -22,7 +22,19 @@ Top-level fields:
 
 The server combines request bounds with configured concurrency, token, cost and model-time limits. Source archive and manifest hashes bind the snapshot; updates also require an exact file preimage hash and unique text match. Paths and protected files are enforced before artifacts are sealed. Source evidence and logs are data, never trusted execution instructions.
 
+The internal model context separates editable `files` from read-only `referenceFiles`. Known dependency/runtime/build manifests inside `rootDirectory` may be supplied as references even outside `allowedPaths`; `allowedPaths` remains the write allowlist. Explicit `protectedPaths`, built-in protection (including `.env*`), and secret detection still exclude these files. Reference content is capped at 24,000 bytes within the shared 180,000-byte source budget. Reference files never become eligible update/create targets. Ancestor workspace files outside the service root are not exposed. Selected plan targets take priority over other files. See the [prompt and architecture review](code-repair-design.md#프롬프트와-현재-설계-점검-2026-10-03).
+
+Plans containing non-code changes return `configuration_required` before source download/model invocation. For code plans the model can identify an external configuration prerequisite, request specific missing evidence, or propose an allowed repository-owned configuration edit. `checksRequired` contains advisory verification descriptions, never trusted shell commands or completed check results. Human-facing model summaries, limitations and checks are requested in Korean.
+
 The completed candidate response includes a candidate outcome and artifact references. `candidate_ready` is a proposed edit, with verification `status: not_run` and `owner: was`. Other model outcomes can request more evidence, identify configuration work, or report no change. They do not establish build success, runtime correctness, PR creation or deployment success.
+
+### Attempts are single-use
+
+Every terminal record, including `FAILED`, is kept under its `requestId`. Resending the same ID returns that record with 409 and never repeats a model call. A transient failure such as an expired source URL, `MODEL_RATE_LIMITED` or `MODEL_PROVIDER_ERROR` therefore needs a new `requestId` (a new attempt). The semantic digest includes `policy.deadline`, so a retry that changes the deadline is a different request.
+
+When the model call completed but its proposal could not be applied (for example `AMBIGUOUS_EDIT` or `PREIMAGE_MISMATCH`), the raw proposal and usage are written to `proposal.json` under the request's private results directory before it is applied. It is not served by the API; operators and WAS recovery can inspect it without paying for the call again.
+
+Source limits are reported as `SOURCE_TOO_LARGE` (more than 1000 files, a file over 5 MiB, or more than 20 MiB expanded). `SOURCE_UNSAFE` is reserved for traversal, links, special files and path collisions. Archives containing symlinks are rejected whole.
 
 ## GET /internal/repairs/{requestId}
 

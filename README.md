@@ -4,6 +4,8 @@ Python 3.11 service that turns a frozen source snapshot and an original `diagnos
 
 The implemented MVP generates candidates synchronously, persists request outcomes, and serves sealed artifacts through authenticated endpoints. `candidate_ready` means a proposed change exists. Verification is `not_run`, owned by WAS; it does not indicate a successful build or deployment. The coordinator stops at `PR_OPENED` for review, preserving the service branch. Candidate validation, PR merge and deployment remain separate steps.
 
+The [repair prompt](src/iris_code_fix_agent/prompts.py) distinguishes source defects from environment/operator changes and requires precise edits plus verification handoff. Read-only environment manifests supplement editable source without granting write access. See the [architecture and prompt review](docs/code-repair-design.md#프롬프트와-현재-설계-점검-2026-10-03) for supported cases and remaining limits.
+
 ## Run locally
 
 ```sh

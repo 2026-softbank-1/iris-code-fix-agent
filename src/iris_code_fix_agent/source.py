@@ -17,6 +17,10 @@ MAX_FILE = 5 * 1024 * 1024
 MAX_FILES = 1000
 
 
+class _LimitExceeded(ValueError):
+    """A size or count limit, reported separately from an unsafe archive."""
+
+
 @dataclass(frozen=True)
 class SourceFile:
     data: bytes
@@ -69,7 +73,7 @@ def _parse_archive(data: bytes, spec: SourceSpec, *, discover=False) -> SourceSn
             with gzip.GzipFile(fileobj=io.BytesIO(data)) as compressed:
                 data = compressed.read(MAX_EXPANDED + 4 * 1024 * 1024 + 1)
             if len(data) > MAX_EXPANDED + 4 * 1024 * 1024:
-                raise ValueError("decompressed archive size")
+                raise _LimitExceeded("decompressed archive size")
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as archive:
             for member in archive:
                 name = member.name.rstrip("/") if member.isdir() else member.name
@@ -78,19 +82,17 @@ def _parse_archive(data: bytes, spec: SourceSpec, *, discover=False) -> SourceSn
                     raise ValueError("duplicate")
                 seen.add(name)
                 if len(seen) > MAX_FILES * 2:
-                    raise ValueError("too many entries")
+                    raise _LimitExceeded("too many entries")
                 if member.isdir():
                     directories.add(name)
                     continue
-                if (
-                    member.type not in (tarfile.REGTYPE, tarfile.AREGTYPE)
-                    or member.size > MAX_FILE
-                    or len(entries) >= MAX_FILES
-                ):
-                    raise ValueError("unsupported entry or size")
+                if member.type not in (tarfile.REGTYPE, tarfile.AREGTYPE):
+                    raise ValueError("unsupported entry type")
+                if member.size > MAX_FILE or len(entries) >= MAX_FILES:
+                    raise _LimitExceeded("file size or count")
                 expanded += member.size
                 if expanded > MAX_EXPANDED:
-                    raise ValueError("expanded size")
+                    raise _LimitExceeded("expanded size")
                 file = archive.extractfile(member)
                 if file is None:
                     raise ValueError("missing data")
@@ -108,6 +110,10 @@ def _parse_archive(data: bytes, spec: SourceSpec, *, discover=False) -> SourceSn
                     for index in range(1, len(parts) + 1)
                 ):
                     raise ValueError("File and directory path collision")
+    except _LimitExceeded:
+        raise RepairError(
+            "SOURCE_TOO_LARGE", "Source archive exceeds a size or file-count limit"
+        ) from None
     except (ValueError, tarfile.TarError, OSError, EOFError):
         raise RepairError(
             "SOURCE_UNSAFE", "Source archive contains unsafe or invalid entries"

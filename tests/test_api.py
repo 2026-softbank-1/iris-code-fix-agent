@@ -1,6 +1,7 @@
 import ast
 import base64
 import copy
+import json
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -9,6 +10,7 @@ import pytest
 from iris_code_fix_agent.api import Settings, create_app
 from iris_code_fix_agent.canonical import semantic_digest, sha256
 from iris_code_fix_agent.contracts import ModelProposal, RepairRequest
+from iris_code_fix_agent.errors import RepairError
 from iris_code_fix_agent.runner import RunnerError, RunnerResponse
 from iris_code_fix_agent.store import ResultStore
 
@@ -350,3 +352,40 @@ async def test_large_diagnosis_does_not_discard_plan_and_guess(api_fixture):
         assert response.status_code == 200
         assert response.json()["status"] == "needs_more_evidence"
         assert runner.calls == 0
+
+
+async def test_model_proposal_is_kept_when_applying_it_fails(
+    tmp_path, syntax_repair_fixture
+):
+    archive, request, proposal = syntax_repair_fixture
+    proposal["edits"][0]["oldText"] = "text that is not in the source"
+    runner = FakeRunner(proposal)
+    source_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, content=archive))
+    )
+    store = ResultStore(tmp_path / "data")
+    app = create_app(Settings(API_KEY, tmp_path / "data"), runner, source_client, store)
+    async with (
+        source_client,
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app), base_url="http://test"
+        ) as client,
+    ):
+        response = await client.post(
+            "/internal/repairs", json=request, headers=headers(request)
+        )
+    assert response.status_code == 422
+    assert store.get(request["requestId"])["status"] == "FAILED"
+    saved = (
+        store.root
+        / "results"
+        / sha256(request["requestId"].encode())
+        / "proposal.json"
+    )
+    body = json.loads(saved.read_text())
+    assert body["proposal"]["edits"][0]["oldText"] == "text that is not in the source"
+    assert body["usage"]["outputTokens"] == 10
+    # Proposals are for operators/WAS recovery, never an API download.
+    assert (store.root / "results").exists()
+    with pytest.raises(RepairError):
+        store.artifact(request["requestId"], "proposal.json")

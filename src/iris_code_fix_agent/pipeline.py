@@ -108,7 +108,9 @@ def check_deadline(request):
         raise RepairError("DEADLINE_EXCEEDED", "Repair deadline expired.", 408)
 
 
-async def run_attempt(request, input_digest: str, runner, client, allowed_hosts=()):
+async def run_attempt(
+    request, input_digest: str, runner, client, allowed_hosts=(), record=None
+):
     check_deadline(request)
     status = validate_diagnosis(request)
     result = {
@@ -155,6 +157,9 @@ async def run_attempt(request, input_digest: str, runner, client, allowed_hosts=
         )
         return result, {}
     response = await runner.propose(context, max_cost_usd=request.policy.max_cost_usd)
+    if record is not None:
+        # The call is paid: keep the exact proposal even if applying it fails below.
+        record(response)
     try:
         return _finish_candidate(request, snapshot, context, response, result)
     except RepairError as exc:

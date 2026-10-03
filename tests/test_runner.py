@@ -174,6 +174,8 @@ async def test_non_candidate_response_is_sanitized_and_accounted(body, code):
     "overrides",
     [
         {"reasoning_effort": "none"},
+        {"model": "not a model!"},
+        {"model": ""},
         {"timeout_seconds": float("nan")},
         {"timeout_seconds": 0},
         {"max_output_tokens": 16385},
@@ -248,3 +250,29 @@ async def test_nonfinite_actual_usage_rejected_safely():
                 client,
             ).propose({}, 1)
     assert exc.value.code == "MODEL_CALL_UNKNOWN"
+
+
+@pytest.mark.asyncio
+async def test_model_name_is_configurable():
+    seen = []
+
+    def handler(request):
+        seen.append(json.loads(request.content)["model"])
+        return httpx.Response(500)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(RunnerError):
+            await OpenAIRepairRunner(
+                RunnerConfig(
+                    api_key="test",
+                    model="another-model-1.0",
+                    input_price_per_million=1,
+                    output_price_per_million=2,
+                ),
+                client,
+            ).propose({}, 1)
+    assert seen == ["another-model-1.0"]
+
+
+def test_default_output_budget_leaves_room_for_reasoning():
+    assert RunnerConfig().max_output_tokens >= 8192

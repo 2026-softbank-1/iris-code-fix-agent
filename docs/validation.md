@@ -6,7 +6,7 @@
 | --- | --- |
 | Python 3.11.4, 고정 uv.lock 설치 | 성공 |
 | Ruff lint | 통과 |
-| pytest | 64 passed |
+| pytest | 126 passed, 1 skipped (2026-10-03 보정 후) |
 | source distribution·wheel 생성 | 성공 |
 | 실제 Uvicorn 프로세스 `/healthz` | HTTP 200 |
 | OpenAPI 조회 | 인증 없이 401, 인증 시 200·수정 요청 schema 포함 |

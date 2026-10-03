@@ -208,6 +208,8 @@ async def test_candidate_repair_branch_draft_pr_without_redeployment(
             result = await worker.run("recursive", 1, 1, allowed_paths=["app.py"])
         assert result["status"] == "PR_OPENED"
         assert result["pullRequestUrl"] == "https://github.com/owner/repo/pull/1"
+        # The fixture WAS context carries no frozen hashes, so the journal says so.
+        assert result["attempts"][0]["sourcePinned"] is False
         assert len(publisher.pushes) == len(generation_calls) == 1
         assert publisher.sha == "a" * 40
         assert publisher.branches == {"iris/repair/recursive-a1": "b" * 40}
@@ -241,3 +243,12 @@ def test_s3_checksum_private_upload_and_failure():
     )
     with pytest.raises(RepairError, match="upload failed"):
         storage.put("run", "patch.diff", b"content")
+
+
+def test_classic_github_token_is_flagged(capsys):
+    from iris_code_fix_agent.auto_repair import warn_if_broad_github_token
+
+    assert warn_if_broad_github_token("ghp_" + "a" * 36)
+    assert "fine-grained" in capsys.readouterr().err
+    assert not warn_if_broad_github_token("github_pat_" + "a" * 40)
+    assert capsys.readouterr().err == ""

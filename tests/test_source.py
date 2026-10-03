@@ -76,3 +76,19 @@ def test_file_descendant_collisions(entries):
     with pytest.raises(RepairError) as error:
         from_archive(data, spec(data, {"a": SourceFile(b"x")}))
     assert error.value.code == "SOURCE_UNSAFE"
+
+
+def test_file_count_limit_is_reported_as_too_large(monkeypatch):
+    monkeypatch.setattr("iris_code_fix_agent.source.MAX_FILES", 3)
+    data = archive([(f"f{i}", b"x", tarfile.REGTYPE) for i in range(4)])
+    with pytest.raises(RepairError) as error:
+        from_archive(data, spec(data, {"f0": SourceFile(b"x")}))
+    assert error.value.code == "SOURCE_TOO_LARGE"
+
+
+def test_single_file_limit_is_reported_as_too_large(monkeypatch):
+    monkeypatch.setattr("iris_code_fix_agent.source.MAX_FILE", 4)
+    data = archive([("big", b"12345", tarfile.REGTYPE)])
+    with pytest.raises(RepairError) as error:
+        from_archive(data, spec(data, {"big": SourceFile(b"12345")}))
+    assert error.value.code == "SOURCE_TOO_LARGE"

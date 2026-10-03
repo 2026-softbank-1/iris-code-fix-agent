@@ -10,6 +10,16 @@ GitHub preimages are checked against the frozen failed source commit. The candid
 
 `PR_OPENED` is a terminal review state. It does not mean the defect is resolved or the deployment succeeded. Validation remains `not_run`; review and independent candidate validation are required before merge. Deployment after merge follows the service's ordinary deployment process. A future verified repair/deployment loop requires a separate implementation.
 
+## Source pinning
+
+`repair-context.source` should include the `archiveSha256` and `manifestSha256` that WAS froze when it stored the snapshot. With both present the coordinator verifies the downloaded archive and manifest against them (`sourcePinned: true` in the journal). Without them the archive can only vouch for itself: the coordinator still requires that the service branch head equals the failed commit and that every changed file's preimage matches GitHub's bytes at that commit, and records `sourcePinned: false`. Treat unpinned attempts as weaker evidence and have WAS supply the hashes. The manifest digest uses the canonical encoding in `source.manifest_digest`: sorted paths, content SHA-256, size, and mode `100755` when any executable bit is set, otherwise `100644`; WAS must compute the same value.
+
+WAS implements this contract in `GET /api/v1/services/{serviceId}/deployments/{deploymentId}/repair-context?diagnosisId=` (iris-was branch `feat/repair-context`). It returns `409 DIAGNOSIS_NOT_SUCCEEDED` unless the diagnosis succeeded, `404` for a diagnosis that belongs to another deployment, and `409 SOURCE_SNAPSHOT_UNAVAILABLE` once the snapshot's 23-hour window has passed. WAS records `archiveSha256`/`manifestSha256` when it uploads a snapshot, so builds made before that migration return them as null and run unpinned. The hash rules above were cross-checked against `source.from_archive` in pinned mode.
+
+## Credentials
+
+Use a fine-grained GitHub token limited to the one service repository with only Contents (read/write) and Pull requests (write). A classic `ghp_` token spans every repository the owner can reach and the coordinator warns when it sees one. The generation API never receives GitHub, WAS or S3 credentials.
+
 ## Configuration and launch
 
 Run the updated WAS endpoint and fix API. Configure these values plus normal AWS SDK credentials. GitHub credentials need read/write contents and pull-request permission for the service repository; WAS_TOKEN must belong to its owner. Credentials and presigned source URLs are not journaled.

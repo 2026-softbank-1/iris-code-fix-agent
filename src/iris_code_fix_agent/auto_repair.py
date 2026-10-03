@@ -7,6 +7,7 @@ import io
 import json
 import os
 import re
+import sys
 import tarfile
 import time
 from datetime import UTC, datetime
@@ -23,6 +24,7 @@ from .publication import GitHubPublisher
 from .source import (
     SourceFile,
     download_source,
+    from_archive,
     inspect_trusted_snapshot,
     manifest_digest,
 )
@@ -163,6 +165,9 @@ class AutoRepair:
                     "NO_CANDIDATE",
                     "DIAGNOSIS_SOURCE_MISMATCH",
                     "DEADLINE_EXCEEDED",
+                    "SOURCE_INTEGRITY",
+                    "SOURCE_TOO_LARGE",
+                    "SOURCE_UNSAFE",
                 }
                 state.update(
                     status="STOPPED" if terminal else "PAUSED_ERROR", reason=exc.code
@@ -296,22 +301,29 @@ class AutoRepair:
                         "Service branch differs from failed source",
                         409,
                     )
+                # Prefer hashes frozen by WAS. Without them the archive can only vouch for
+                # itself, so the attempt records that the source was not pinned.
+                pinned = bool(source.get("archiveSha256") and source.get("manifestSha256"))
                 spec = SourceSpec(
                     repositoryId=repository,
                     baseCommitSha=source["commitSha"],
                     rootDirectory=source["rootDirectory"],
                     downloadUrl=source["downloadUrl"],
-                    archiveSha256="0" * 64,
-                    manifestSha256="0" * 64,
+                    archiveSha256=source.get("archiveSha256") or "0" * 64,
+                    manifestSha256=source.get("manifestSha256") or "0" * 64,
                 )
                 raw = await download_source(
                     spec, self.source_client, self.allowed_source_hosts
                 )
-                spec = spec.model_copy(update={"archive_sha256": sha256(raw)})
-                snapshot = inspect_trusted_snapshot(raw, spec)
-                spec = spec.model_copy(
-                    update={"manifest_sha256": snapshot.manifest_sha256}
-                )
+                if pinned:
+                    snapshot = from_archive(raw, spec)
+                else:
+                    spec = spec.model_copy(update={"archive_sha256": sha256(raw)})
+                    snapshot = inspect_trusted_snapshot(raw, spec)
+                    spec = spec.model_copy(
+                        update={"manifest_sha256": snapshot.manifest_sha256}
+                    )
+                attempt["sourcePinned"] = pinned
                 plans = (
                     context["diagnosisResult"]
                     .get("analysis", {})
@@ -468,8 +480,22 @@ class AutoRepair:
         return state
 
 
+def warn_if_broad_github_token(token: str) -> bool:
+    """A classic PAT reaches every repository its owner can; scope it per service."""
+    broad = token.startswith("ghp_")
+    if broad:
+        print(
+            "warning: GITHUB_TOKEN is a classic token; use a fine-grained token limited "
+            "to the service repository (Contents and Pull requests write only)",
+            file=sys.stderr,
+            flush=True,
+        )
+    return broad
+
+
 def main():
     load_environment()
+    warn_if_broad_github_token(os.environ.get("GITHUB_TOKEN", ""))
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-id")
     parser.add_argument("--service-id", type=int, required=True)

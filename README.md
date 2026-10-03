@@ -38,6 +38,8 @@ curl -sS -X POST http://localhost:8000/internal/repairs \
 
 ## Checks and container
 
+The [S3/Docker/cloud evaluation](docs/s3-docker-evaluation.md) exercises deliberately broken source and Dockerfiles, real S3 retrieval, model repair, GitHub push, isolated container execution, and the existing WAS deployment/redeployment APIs.
+
 [구현 검증 기록](docs/validation.md)에 테스트 범위와 실제 모델·WAS 연동의 남은 검증을 정리했습니다.
 
 ```sh

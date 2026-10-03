@@ -50,3 +50,33 @@ class S3Artifacts:
         return self.client.generate_presigned_url(
             "get_object", Params=params, ExpiresIn=300
         )
+
+    def get(self, reference: dict) -> bytes:
+        """Retrieve sealed bytes from this store, checking size and digest."""
+        if (
+            reference.get("bucket") != self.bucket
+            or not reference.get("key", "").startswith(self.prefix + "/")
+            or not re.fullmatch(r"[a-f0-9]{64}", reference.get("sha256", ""))
+            or type(reference.get("byteLength")) is not int
+            or not 0 <= reference["byteLength"] <= 10 * 1024 * 1024
+        ):
+            raise RepairError("ARTIFACT_INTEGRITY_ERROR", "Invalid stored reference")
+        params = {"Bucket": self.bucket, "Key": reference["key"]}
+        if reference.get("versionId"):
+            params["VersionId"] = reference["versionId"]
+        try:
+            response = self.client.get_object(**params)
+            body = response["Body"]
+            try:
+                data = body.read(reference["byteLength"] + 1)
+            finally:
+                body.close()
+        except (BotoCoreError, ClientError):
+            raise RepairError(
+                "S3_DOWNLOAD_FAILED", "Repair artifact download failed", 502
+            ) from None
+        if len(data) != reference["byteLength"] or sha256(data) != reference["sha256"]:
+            raise RepairError(
+                "ARTIFACT_INTEGRITY_ERROR", "Stored artifact bytes changed"
+            )
+        return data

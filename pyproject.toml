@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "iris-code-fix-agent"
+version = "0.1.0"
+description = "Authenticated, bounded repair candidate generation for IRIS"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.34,<1",
+    "httpx>=0.28,<1",
+    "PyJWT[crypto]>=2.10,<3",
+    "pydantic>=2.10,<3",
+    "python-dotenv>=1.0,<2",
+    "boto3>=1.43.106,<2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9", "pytest-asyncio>=0.25,<2", "ruff>=0.11,<1"]
+
+[project.scripts]
+iris-code-fix-agent = "iris_code_fix_agent.api:main"
+iris-github-auth = "iris_code_fix_agent.github_auth:main"
+iris-auto-repair = "iris_code_fix_agent.auto_repair:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py311"
+extend-exclude = ["examples/source"]

@@ -1,0 +1,53 @@
+{
+  "date": "2026-10-03",
+  "runId": "cb0b72f35a7e",
+  "allPassed": true,
+  "repairTransport": "ASGI API with actual model and S3 HTTPS source",
+  "diagnosis": "author-created, independently confirmed by real CodeBuild logs",
+  "cloudFlow": "WAS -> S3 -> CodeBuild -> ECR -> GitOps -> EKS",
+  "automaticRepairRedeployTested": false,
+  "modelCalls": 2,
+  "successfulRunEstimatedCostUsd": 0.01128,
+  "earlierHarnessAttemptEstimatedCostUsd": 0.005698,
+  "bucket": "iris-dev-code-fix-evaluation-187069338876-ap-northeast-2",
+  "projectId": 6,
+  "checks": {
+    "pytestPassed": 104,
+    "pytestSkipped": 1,
+    "ruff": "passed"
+  },
+  "cases": [
+    {
+      "case": "code",
+      "serviceId": 15,
+      "failedDeploymentId": 26,
+      "correctedDeploymentId": 31,
+      "redeploymentId": 33,
+      "sourceSha": "7af928ff6c599afda3853406ebbb21ec7e6ac893",
+      "publicChecks": [
+        {
+          "url": "https://fix-e2e-cb0b72-code-15.likelion.uk",
+          "passed": true,
+          "assertions": 5
+        }
+      ],
+      "passed": true
+    },
+    {
+      "case": "docker",
+      "serviceId": 16,
+      "failedDeploymentId": 27,
+      "correctedDeploymentId": 30,
+      "redeploymentId": 34,
+      "sourceSha": "1c283a66198edbc2a07ac0ee1168c8034aabbef2",
+      "publicChecks": [
+        {
+          "url": "https://fix-e2e-cb0b72-docker-16.likelion.uk",
+          "passed": true,
+          "assertions": 5
+        }
+      ],
+      "passed": true
+    }
+  ]
+}
